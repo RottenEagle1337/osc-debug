@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -19,6 +20,7 @@ namespace osc_debug
 
         private OscSender? oscSender;
         private readonly object senderLock = new();
+        private OscArgumentParser parser = new();
 
         private readonly List<LogEntry> sendLogEntries = new();
         private const int MaxSendLogEntries = 100;
@@ -27,7 +29,7 @@ namespace osc_debug
         {
             public DateTime Timestamp { get; set; }
             public string Address { get; set; }
-            public string[] Arguments { get; set; }
+            public object[] Arguments { get; set; } = Array.Empty<object>();
             public bool IsBundle { get; set; }
             public bool IsSystemMessage { get; set; }
 
@@ -38,11 +40,12 @@ namespace osc_debug
 
                 if (IsSystemMessage && Arguments.Length > 0)
                 {
-                    sb.AppendLine(Arguments[0]);
+                    sb.AppendLine(Arguments[0]?.ToString() ?? "");
                 }
                 else if (Arguments.Length > 0)
                 {
-                    sb.AppendLine($"Arguments: {string.Join(", ", Arguments)}");
+                    string formattedArgs = string.Join(", ", Arguments.Select(FormatArgumentWithTypeInfo));
+                    sb.AppendLine($"Arguments: {formattedArgs}");
                 }
 
                 return sb.ToString();
@@ -183,15 +186,15 @@ namespace osc_debug
             if (packet is OscMessage message)
             {
                 entry.Address = message.Address;
-                entry.Arguments = message.ToArray().Select(a => a.ToString() ?? "null").ToArray();
+                entry.Arguments = message.ToArray();
                 entry.IsBundle = false;
                 entry.IsSystemMessage = false;
             }
             else if (packet is OscBundle bundle)
             {
                 entry.Address = "OSC Bundle";
-                entry.Arguments = bundle.Select(m =>
-                    m is OscMessage msg ? $"{msg.Address}: {string.Join(", ", msg.ToArray().Select(a => a.ToString() ?? "null"))}" : "Unknown").ToArray();
+                entry.Arguments = bundle.SelectMany(m =>
+                    m is OscMessage msg ? msg.ToArray() : Array.Empty<object>()).ToArray();
                 entry.IsBundle = true;
                 entry.IsSystemMessage = false;
             }
@@ -282,10 +285,10 @@ namespace osc_debug
 
             try
             {
-                oscSender = new OscSender(remoteIP, port);
+                oscSender = new OscSender(remoteIP, 0, port);
                 oscSender.Connect();
 
-                AddSystemLog($"Connected to {remoteIP}:{port}", sendLogEntries, txtSendLog);
+                AddSystemLog($"Connected to {remoteIP}:{port} with local port: {oscSender.LocalPort}", sendLogEntries, txtSendLog);
 
                 btnSendConnect.Enabled = false;
                 btnSendDisconnect.Enabled = true;
@@ -348,10 +351,15 @@ namespace osc_debug
                         continue;
 
                     string argsString = row.Cells["Arguments"].Value?.ToString() ?? "";
-                    object[] args = ParseArguments(argsString);
+                    object[] args = parser.ParseArguments(argsString); //ParseArguments(argsString);
 
                     await SendOscMessageAsync(address, args);
-                    AddSystemLog($"Sent: {address} ({string.Join(", ", args)})", sendLogEntries, txtSendLog);
+
+                    string argsLog = args.Length > 0
+                        ? string.Join(", ", args.Select(FormatArgumentWithTypeInfo))
+                        : "no args";
+                    AddSystemLog($"Sent: {address} [{args.Length}] ({argsLog})", sendLogEntries, txtSendLog);
+
                     sentCount++;
                     await Task.Delay(10);
                 }
@@ -381,31 +389,6 @@ namespace osc_debug
                     oscSender.Send(message);
                 }
             });
-        }
-
-        private object[] ParseArguments(string argsString)
-        {
-            if (string.IsNullOrWhiteSpace(argsString))
-                return Array.Empty<object>();
-
-            return argsString.Split(';')
-                .Select(part => part.Trim())
-                .Where(p => !string.IsNullOrEmpty(p))
-                .Select(ParseArgument)
-                .ToArray();
-        }
-
-        private static object ParseArgument(string input)
-        {
-            string normalized = input.Replace(',', '.');
-
-            if (int.TryParse(normalized, out int intValue)) return intValue;
-            if (float.TryParse(normalized, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out float floatValue))
-                return floatValue;
-            if (bool.TryParse(normalized, out bool boolValue)) return boolValue;
-
-            return input;
         }
         #endregion
 
@@ -465,6 +448,25 @@ namespace osc_debug
         #endregion
 
         #region logging
+
+        private static string FormatArgumentWithTypeInfo(object arg)
+        {
+            if (arg == null) return "null (null)";
+
+            string typeName = arg.GetType().Name;
+
+            return arg switch
+            {
+                string s => $"\"{s}\" ({typeName})",
+                char c => $"'{c}' ({typeName})",
+                bool b => $"{b.ToString().ToLowerInvariant()} ({typeName})",
+                float f => $"{f.ToString(CultureInfo.InvariantCulture)} ({typeName})",
+                double d => $"{d.ToString(CultureInfo.InvariantCulture)} ({typeName})",
+                long l => $"{l} ({typeName})",
+                _ => $"{arg} ({typeName})"
+            };
+        }
+
         private void AddLogEntry(LogEntry entry, List<LogEntry> logEntries, TextBox logTextBox)
         {
             if (IsDisposed) return;
